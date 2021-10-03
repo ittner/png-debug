@@ -1,0 +1,174 @@
+#!/usr/bin/env python3
+
+
+import argparse
+import os
+import struct
+import sys
+import zlib
+
+
+class AbortException(Exception):
+    pass
+
+
+def pack_chunk(cktype, ckdata=b""):
+    cklen = struct.pack(">I", len(ckdata))
+    crc = zlib.crc32(cktype + ckdata)
+    ckcrc = struct.pack(">I", crc)
+    return cklen + cktype + ckdata + ckcrc
+
+
+def read_exact_len(fp, reqlen):
+    data = fp.read(reqlen)
+    if len(data) != reqlen:
+        raise ValueError("Bad chunk data length. Premature end of file?")
+    return data
+
+
+def iter_chunks(fp):
+    PNG_MAGIC = b"\x89PNG\x0d\x0a\x1a\x0a"
+
+    magic = fp.read(len(PNG_MAGIC))
+    if magic != PNG_MAGIC:
+        raise ValueError("Bad magic string. Not a PNG file?")
+    yield (magic,)
+
+    while True:
+        cklen = read_exact_len(fp, 4)
+        (data_len,) = struct.unpack(">I", cklen)
+        cktype = read_exact_len(fp, 4)
+        ckdata = read_exact_len(fp, data_len)
+        ckcrc = read_exact_len(fp, 4)
+        yield (cklen, cktype, ckdata, ckcrc)
+        if cktype == b"IEND":
+            break
+
+
+def cmd_explode(args):
+    """Save PNG chunks to individual files."""
+    outdir = args.output
+    if not outdir:
+        if args.input is None:
+            raise AbortException("Output directory is required when reading from stdin")
+        outdir = args.input + ".exploded"
+    if os.path.exists(outdir):
+        if os.listdir(outdir):
+            raise AbortException("Output directory exists and is not empty")
+    else:
+        os.mkdir(outdir)
+    fp = open(args.input, "rb") if (args.input is not None) else sys.stdin.buffer
+    try:
+        i = 0
+        for cktup in iter_chunks(fp):
+            if len(cktup) == 4:
+                ckname = "_" + cktup[1].decode("ascii", "replace").replace(
+                    "\ufffd", "_"
+                )
+            else:
+                ckname = ""
+            ckfname = "%08d%s.bin" % (i, ckname)
+            with open(os.path.join(outdir, ckfname), "wb") as ofp:
+                ofp.write(b"".join(cktup))
+            i += 1
+    finally:
+        fp.close()
+
+
+def cmd_set_loop(args):
+    """Set number of animation loops."""
+
+    fp = None
+    ofp = None
+    try:
+        fp = open(args.input, "rb") if (args.input is not None) else sys.stdin.buffer
+        ofp = (
+            open(args.output, "wb") if (args.output is not None) else sys.stdout.buffer
+        )
+
+        nfound = 0
+        for cktup in iter_chunks(fp):
+            if len(cktup) == 4 and cktup[1] == b"acTL":
+                num_frames, num_plays = struct.unpack(">II", cktup[2])
+                num_plays = args.num_plays
+                ckdata = struct.pack(">II", num_frames, num_plays)
+                ofp.write(pack_chunk(cktup[1], ckdata))
+                nfound += 1
+            else:
+                ofp.write(b"".join(cktup))
+        if nfound == 0:
+            sys.stderr.write("Warning: this file was not animated.\n")
+        elif nfound > 1:
+            sys.stderr.write(
+                "Warning: found %d animation control chunks in the input file. "
+                "This APNG is invalid and may not render correctly.\n" % (nfound,)
+            )
+    finally:
+        if fp:
+            fp.close()
+        if ofp:
+            ofp.close()
+
+
+def main():
+    main_parser = argparse.ArgumentParser(
+        description="Play with (A)PNG files.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+
+    main_parser.add_argument(
+        "-i",
+        "--input",
+        action="store",
+        default=None,
+        type=str,
+        metavar="INPUT_FILE",
+        help="Input file (stdin if not given)",
+    )
+
+    main_parser.add_argument(
+        "-o",
+        "--output",
+        action="store",
+        default=None,
+        type=str,
+        metavar="OUTPUT",
+        help="Output file or directory (some commands assume stdout if not given)",
+    )
+
+    subparsers = main_parser.add_subparsers(dest="cmd")
+
+    explode_parser = subparsers.add_parser("explode", help=cmd_explode.__doc__)
+    explode_parser.set_defaults(func=cmd_explode)
+
+    set_loop_parser = subparsers.add_parser("set-loop", help=cmd_set_loop.__doc__)
+    set_loop_parser.add_argument(
+        "-n",
+        "--num-plays",
+        action="store",
+        default=0,
+        type=int,
+        metavar="NUM_LOOPS",
+        help="Number of loops (zero for infinite)",
+    )
+    set_loop_parser.set_defaults(func=cmd_set_loop)
+
+    try:
+        args = main_parser.parse_args()
+        if not args.cmd:
+            raise AbortException("No command given, try --help.")
+        args.func(args)
+
+    except AbortException as exc:
+        sys.stderr.write("%s\n" % str(exc))
+        return 1
+
+    except Exception as exc:
+        sys.stderr.write("Error: %s\n" % str(exc))
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
