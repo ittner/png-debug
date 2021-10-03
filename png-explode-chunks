@@ -4,10 +4,18 @@
 import os
 import struct
 import sys
+import zlib
 
 
 class AbortError(Exception):
     pass
+
+
+def pack_chunk(cktype, ckdata=b""):
+    cklen = struct.pack(">I", len(ckdata))
+    crc = zlib.crc32(cktype + ckdata)
+    ckcrc = struct.pack(">I", crc)
+    return cklen + cktype + ckdata + ckcrc
 
 
 def read_exact_len(fp, reqlen):
@@ -23,7 +31,7 @@ def iter_chunks(fp):
     magic = fp.read(len(PNG_MAGIC))
     if magic != PNG_MAGIC:
         raise ValueError("Bad magic string. Not a PNG file?")
-    yield (None, magic)
+    yield (magic,)
 
     while True:
         cklen = read_exact_len(fp, 4)
@@ -31,7 +39,7 @@ def iter_chunks(fp):
         cktype = read_exact_len(fp, 4)
         ckdata = read_exact_len(fp, data_len)
         ckcrc = read_exact_len(fp, 4)
-        yield (cktype, cklen + cktype + ckdata + ckcrc)
+        yield (cklen, cktype, ckdata, ckcrc)
         if cktype == b"IEND":
             break
 
@@ -48,14 +56,15 @@ def main(fname, outdir=None):
     with open(fname, "rb") as fp:
         i = 0
         for cktup in iter_chunks(fp):
-            cktype = cktup[0]
-            if cktype:
-                ckname = "_" + cktype.decode("ascii", "replace").replace("\ufffd", "_")
+            if len(cktup) == 4:
+                ckname = "_" + cktup[1].decode("ascii", "replace").replace(
+                    "\ufffd", "_"
+                )
             else:
                 ckname = ""
             ckfname = "%08d%s.bin" % (i, ckname)
             with open(os.path.join(outdir, ckfname), "wb") as ofp:
-                ofp.write(cktup[1])
+                ofp.write(b"".join(cktup))
             i += 1
 
 
